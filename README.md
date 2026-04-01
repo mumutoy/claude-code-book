@@ -126,6 +126,9 @@
 - 补充实战练习和案例分析
 - 改进章节结构和可读性
 
+## 致谢
+[Linux.Do](https://linux.do/)
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=lintsinghua/claude-code-book&type=Date)](https://star-history.com/#lintsinghua/claude-code-book&Date)
