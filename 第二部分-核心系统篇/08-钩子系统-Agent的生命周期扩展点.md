@@ -22,23 +22,57 @@
 
 钩子（Hook）是 Claude Code 生命周期中用户可自定义的扩展点。通过钩子，用户可以在不修改 Claude Code 源码的前提下，在关键节点注入自定义逻辑——从审批工具调用、修改工具输入，到拦截用户请求、注入额外上下文。
 
+```mermaid
+flowchart TD
+    event["生命周期事件触发"] --> collect["收集所有匹配的钩子"]
+    collect --> security["安全门禁检查"]
+    security -->|"未通过"| reject["跳过钩子执行"]
+    security -->|"通过"| sort["按优先级排序<br/>userSettings > projectSettings<br/>> localSettings > plugin"]
+    sort --> execute["依次执行钩子"]
+    execute --> check{"钩子返回<br/>decision: block?"}
+    check -->|"是"| blocked["操作被阻止"]
+    check -->|"否"| next{"还有下一个钩子?"}
+    next -->|"是"| execute
+    next -->|"否"| done["继续正常流程"]
+
+    classDef event fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px,color:#1a237e
+    classDef process fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef decision fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+    classDef blocked_node fill:#ffcdd2,stroke:#d32f2f,stroke-width:2px,color:#b71c1c
+    classDef success fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+
+    class event event
+    class collect,security,sort,execute process
+    class check,next decision
+    class reject,blocked blocked_node
+    class done success
+```
+
 ### 五种钩子类型
 
 钩子 Schema 定义模块中定义了四种可持久化的钩子类型，加上仅在运行时存在的 FunctionHook，共五种。下面这张对比表可以帮助你快速理解每种钩子的定位和能力边界：
 
-```
-┌──────────────────────────────────────────────────────────────────────────────┐
-│                        五种钩子类型能力图谱                                    │
-├──────────┬───────────┬──────────────┬───────────┬───────────┬────────────────┤
-│  维度     │ Command   │ Prompt       │ Agent     │ HTTP      │ Function      │
-├──────────┼───────────┼──────────────┼───────────┼───────────┼────────────────┤
-│ 执行引擎  │ Shell     │ LLM 推理     │ LLM 多步  │ HTTP 请求  │ TS 回调函数    │
-│ 可持久化  │ ✓         │ ✓            │ ✓         │ ✓         │ ✗              │
-│ 配置格式  │ JSON      │ JSON         │ JSON      │ JSON      │ TypeScript API │
-│ 复杂度    │ 低        │ 中           │ 高        │ 中        │ 低             │
-│ 延迟      │ 毫秒级    │ 秒级         │ 秒~分钟   │ 网络依赖   │ 毫秒级         │
-│ 典型场景  │ 脚本检查  │ 内容审核     │ 测试验证  │ CI 集成   │ 运行时拦截     │
-└──────────┴───────────┴──────────────┴───────────┴───────────┴────────────────┘
+```mermaid
+graph TD
+    subgraph 五种钩子类型["五种钩子类型能力图谱"]
+        cmd["Command 钩子<br/>──────────<br/>执行引擎: Shell<br/>可持久化: 是<br/>配置格式: JSON<br/>复杂度: 低<br/>延迟: 毫秒级<br/>典型场景: 脚本检查"]
+        prompt["Prompt 钩子<br/>──────────<br/>执行引擎: LLM 推理<br/>可持久化: 是<br/>配置格式: JSON<br/>复杂度: 中<br/>延迟: 秒级<br/>典型场景: 内容审核"]
+        agent["Agent 钩子<br/>──────────<br/>执行引擎: LLM 多步<br/>可持久化: 是<br/>配置格式: JSON<br/>复杂度: 高<br/>延迟: 秒~分钟<br/>典型场景: 测试验证"]
+        http["HTTP 钩子<br/>──────────<br/>执行引擎: HTTP 请求<br/>可持久化: 是<br/>配置格式: JSON<br/>复杂度: 中<br/>延迟: 网络依赖<br/>典型场景: CI 集成"]
+        func["Function 钩子<br/>──────────<br/>执行引擎: TS 回调函数<br/>可持久化: 否<br/>配置格式: TypeScript API<br/>复杂度: 低<br/>延迟: 毫秒级<br/>典型场景: 运行时拦截"]
+    end
+
+    classDef cmd fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef prompt fill:#e8f5e9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    classDef agent fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+    classDef http fill:#f3e5f5,stroke:#7b1fa2,stroke-width:2px,color:#4a148c
+    classDef func fill:#fce4ec,stroke:#c2185b,stroke-width:2px,color:#880e4f
+
+    class cmd cmd
+    class prompt prompt
+    class agent agent
+    class http http
+    class func func
 ```
 
 **1. Command 钩子**（`BashCommandHookSchema`）
@@ -138,26 +172,36 @@ Command 钩子支持三种执行模式：
 - **异步模式**（`async: true`）：在后台运行，不阻塞当前操作。钩子结果对模型不可见。适合"发后即忘"的日志记录或通知场景。
 - **异步唤醒模式**（`asyncRewake: true`）：在后台运行，但当钩子以退出码 2 结束时，注入错误消息唤醒模型继续对话。这暗示 `async` 属性。适合长时间运行的监控任务——正常运行时不干扰 Agent，只在检测到异常时才介入。
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                     三种执行模式的流程对比                                │
-├─────────────────────────────────────────────────────────────────────────┤
-│                                                                         │
-│  同步模式（默认）              异步模式（async）        异步唤醒模式      │
-│  ┌──────────┐                 ┌──────────┐            ┌──────────┐     │
-│  │ Agent    │                 │ Agent    │            │ Agent    │     │
-│  │ 执行操作 │                 │ 执行操作 │            │ 执行操作 │     │
-│  └────┬─────┘                 └────┬─────┘            └────┬─────┘     │
-│       ↓ 暂停                       ↓ 不等待                ↓ 不等待   │
-│  ┌──────────┐                 ┌──────────┐            ┌──────────┐     │
-│  │ Hook     │                 │ Hook     │(后台)       │ Hook     │(后台)│
-│  │ 执行     │                 │ 执行     │            │ 执行     │     │
-│  └────┬─────┘                 └────┬─────┘            └────┬─────┘     │
-│       ↓ 根据结果                   ↓ 继续                    ↓          │
-│  ┌──────────┐                 ┌──────────┐     退出码=2? ┌──────────┐  │
-│  │ 继续/阻止│                 │ 正常流程 │     ──Yes──→ │ 唤醒模型 │  │
-│  └──────────┘                 └──────────┘            └──────────┘  │
-└─────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph sync_mode["同步模式（默认）"]
+        direction TB
+        s1["Agent 执行操作"] -->|"暂停等待"| s2["Hook 执行"]
+        s2 -->|"根据结果"| s3["继续 / 阻止"]
+    end
+
+    subgraph async_mode["异步模式（async）"]
+        direction TB
+        a1["Agent 执行操作"] -->|"不等待"| a2["Hook 后台执行"]
+        a1 --> a3["正常流程继续"]
+    end
+
+    subgraph async_rewake["异步唤醒模式（asyncRewake）"]
+        direction TB
+        ar1["Agent 执行操作"] -->|"不等待"| ar2["Hook 后台执行"]
+        ar2 -->|"退出码 ≠ 2"| ar3["正常运行"]
+        ar2 -->|"退出码 = 2"| ar4["唤醒模型继续对话"]
+    end
+
+    classDef agent fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef hook fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+    classDef result fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    classDef alert fill:#ffebee,stroke:#f44336,stroke-width:2px,color:#b71c1c
+
+    class s1,a1,ar1 agent
+    class s2,a2,ar2 hook
+    class s3,a3,ar3 result
+    class ar4 alert
 ```
 
 异步钩子的实现在后台执行函数中完成。异步唤醒模式的钩子绕过常规的注册表，在完成时通过通知队列注入消息。这种设计确保了异步钩子的执行不会阻塞 Agent 的主循环，同时保留了在必要时"拉响警报"的能力。
@@ -170,34 +214,57 @@ SDK 核心类型模块定义了完整的 `HOOK_EVENTS` 数组，共 26 个生命
 
 理解这些事件的最佳方式是把 Agent 的一次完整执行循环想象成一条"流水线"。物料（用户请求）从一端进入，经过多个工位（生命周期事件）的处理，最终从另一端产出成品（Agent 响应）。每个工位都安装了"传感器"（事件），钩子就是连接在传感器上的"控制单元"。
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    Agent 生命周期事件全景图                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│  ┌─ 会话层 ──────────────────────────────────────────────────────────────┐  │
-│  │  SessionStart → [用户交互循环] → SessionEnd                           │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                              │                                              │
-│  ┌─ 用户交互层 ──────────────┼──────────────────────────────────────────┐  │
-│  │  UserPromptSubmit → [Agent处理] → Stop / StopFailure                  │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                              │                                              │
-│  ┌─ 工具调用层 ──────────────┼──────────────────────────────────────────┐  │
-│  │  PreToolUse → [执行] → PostToolUse / PostToolUseFailure              │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                              │                                              │
-│  ┌─ 子代理层 ────────────────┼──────────────────────────────────────────┐  │
-│  │  SubagentStart → [子代理执行] → SubagentStop                          │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                              │                                              │
-│  ┌─ 压缩层 ─────────────────┼──────────────────────────────────────────┐  │
-│  │  PreCompact → [压缩执行] → PostCompact                                │  │
-│  └──────────────────────────────────────────────────────────────────────┘  │
-│                                                                             │
-│  其他事件：PermissionRequest/PermissionDenied, ConfigChange,               │
-│           CwdChanged, FileChanged, Notification, Setup, Elicitation...     │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    subgraph 会话层["会话层"]
+        SessionStart["SessionStart"] --> UserLoop["用户交互循环"]
+        UserLoop --> SessionEnd["SessionEnd"]
+    end
+
+    subgraph 用户交互层["用户交互层"]
+        UserPromptSubmit["UserPromptSubmit"] --> AgentProcess["Agent 处理"]
+        AgentProcess --> Stop["Stop / StopFailure"]
+    end
+
+    subgraph 工具调用层["工具调用层"]
+        PreToolUse["PreToolUse"] --> ToolExec["工具执行"]
+        ToolExec --> PostToolUse["PostToolUse / PostToolUseFailure"]
+    end
+
+    subgraph 子代理层["子代理层"]
+        SubagentStart["SubagentStart"] --> SubagentExec["子代理执行"]
+        SubagentExec --> SubagentStop["SubagentStop"]
+    end
+
+    subgraph 压缩层["压缩层"]
+        PreCompact["PreCompact"] --> CompactExec["压缩执行"]
+        CompactExec --> PostCompact["PostCompact"]
+    end
+
+    subgraph 其他事件["其他事件"]
+        Other["PermissionRequest / PermissionDenied<br/>ConfigChange / CwdChanged / FileChanged<br/>Notification / Setup / Elicitation / InstructionsLoaded"]
+    end
+
+    UserLoop --> UserPromptSubmit
+    AgentProcess --> PreToolUse
+    AgentProcess --> SubagentStart
+    AgentProcess --> PreCompact
+
+    classDef session fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px,color:#1a237e
+    classDef user fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef tool fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+    classDef sub fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#1b5e20
+    classDef compact fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#880e4f
+    classDef other fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px,color:#4a148c
+    classDef process fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#616161
+
+    class SessionStart,SessionEnd session
+    class UserPromptSubmit,Stop user
+    class PreToolUse,PostToolUse,PostToolUseFailure tool
+    class SubagentStart,SubagentStop sub
+    class PreCompact,PostCompact compact
+    class Other 其他事件
+    class ToolExec,AgentProcess,SubagentExec,CompactExec,UserLoop process
 ```
 
 以下按功能分组介绍核心事件，对每个事件详细说明其触发时机、输入结构和使用场景。
@@ -432,37 +499,32 @@ PreCompact 钩子的处理流程包括：构建钩子输入、执行钩子、提
 
 下表总结了所有 26 个事件的分类、可否阻止和典型用途：
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                    26 个生命周期事件速查表                                │
-├──────────────────┬────────────────┬──────────┬──────────────────────────┤
-│ 事件名称          │ 分类            │ 可阻止   │ 核心用途                 │
-├──────────────────┼────────────────┼──────────┼──────────────────────────┤
-│ PreToolUse       │ 工具调用        │ ✓        │ 拦截/修改工具输入        │
-│ PostToolUse      │ 工具调用        │ ✗        │ 审计/后处理工具输出      │
-│ PostToolUseFailure│ 工具调用       │ ✗        │ 失败诊断/上报            │
-│ UserPromptSubmit │ 用户交互        │ ✓        │ 修改/阻止用户消息        │
-│ Notification     │ 用户交互        │ ✗        │ 通知集成                 │
-│ SessionStart     │ 会话管理        │ ✗*       │ 环境初始化/上下文注入    │
-│ SessionEnd       │ 会话管理        │ ✗        │ 清理/摘要                │
-│ Stop             │ 会话管理        │ ✓        │ 强制继续/质量检查        │
-│ StopFailure      │ 会话管理        │ ✗        │ 错误上报                 │
-│ SubagentStart    │ 子代理          │ ✗        │ 子代理监控               │
-│ SubagentStop     │ 子代理          │ ✓        │ 结果验证                 │
-│ PreCompact       │ 压缩            │ ✓        │ 自定义压缩策略           │
-│ PostCompact      │ 压缩            │ ✗        │ 压缩质量检查             │
-│ PermissionRequest│ 权限            │ ✓        │ 自动权限审批             │
-│ PermissionDenied │ 权限            │ ✗        │ 替代方案建议             │
-│ Setup            │ 初始化          │ ✗        │ 环境准备                 │
-│ ConfigChange     │ 配置            │ ✓        │ 配置变更审计             │
-│ Elicitation      │ MCP 交互        │ ✗        │ MCP 输入监控             │
-│ ElicitationResult│ MCP 交互        │ ✗        │ MCP 结果监控             │
-│ CwdChanged       │ 环境            │ ✗        │ 目录变更通知             │
-│ FileChanged      │ 环境            │ ✗        │ 文件变更通知             │
-│ InstructionsLoaded│ 指令           │ ✗        │ 指令加载审计             │
-└──────────────────┴────────────────┴──────────┴──────────────────────────┘
-  * SessionStart 的阻止被忽略（优雅降级设计）
-```
+| 事件名称 | 分类 | 可阻止 | 核心用途 |
+|---------|------|-------|---------|
+| PreToolUse | 工具调用 | 是 | 拦截/修改工具输入 |
+| PostToolUse | 工具调用 | 否 | 审计/后处理工具输出 |
+| PostToolUseFailure | 工具调用 | 否 | 失败诊断/上报 |
+| UserPromptSubmit | 用户交互 | 是 | 修改/阻止用户消息 |
+| Notification | 用户交互 | 否 | 通知集成 |
+| SessionStart | 会话管理 | 否* | 环境初始化/上下文注入 |
+| SessionEnd | 会话管理 | 否 | 清理/摘要 |
+| Stop | 会话管理 | 是 | 强制继续/质量检查 |
+| StopFailure | 会话管理 | 否 | 错误上报 |
+| SubagentStart | 子代理 | 否 | 子代理监控 |
+| SubagentStop | 子代理 | 是 | 结果验证 |
+| PreCompact | 压缩 | 是 | 自定义压缩策略 |
+| PostCompact | 压缩 | 否 | 压缩质量检查 |
+| PermissionRequest | 权限 | 是 | 自动权限审批 |
+| PermissionDenied | 权限 | 否 | 替代方案建议 |
+| Setup | 初始化 | 否 | 环境准备 |
+| ConfigChange | 配置 | 是 | 配置变更审计 |
+| Elicitation | MCP 交互 | 否 | MCP 输入监控 |
+| ElicitationResult | MCP 交互 | 否 | MCP 结果监控 |
+| CwdChanged | 环境 | 否 | 目录变更通知 |
+| FileChanged | 环境 | 否 | 文件变更通知 |
+| InstructionsLoaded | 指令 | 否 | 指令加载审计 |
+
+* SessionStart 的阻止被忽略（优雅降级设计）
 
 ---
 
@@ -474,28 +536,32 @@ PreCompact 钩子的处理流程包括：构建钩子输入、执行钩子、提
 
 ### 响应协议全景图
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                    钩子响应协议结构                                    │
-├──────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  {                                                                   │
-│    "decision": "approve" | "block",        // 全局决策               │
-│    "reason": "...",                        // 阻止原因（block 时）   │
-│    "additionalContext": "...",             // 注入额外上下文         │
-│    "continue": true | false,              // 是否继续生成            │
-│    "stopReason": "...",                    // 停止原因               │
-│    "hookSpecificOutput": {                 // 事件特定输出           │
-│      "hookEventName": "...",               //   目标事件名           │
-│      // ... 事件特定字段                                         │
-│    }                                                                 │
-│  }                                                                   │
-│                                                                      │
-│  同时：                                                              │
-│  - stdout：非 JSON 部分展示给用户（退出码非 0 时）                   │
-│  - stderr：展示给模型（退出码 2 时）或用户（其他非 0 退出码时）     │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph 钩子响应协议["钩子 JSON 响应协议"]
+        root["钩子响应 JSON"]
+        root --> decision["decision<br/>approve | block<br/>全局决策"]
+        root --> reason["reason<br/>阻止原因（block 时）"]
+        root --> context["additionalContext<br/>注入额外上下文"]
+        root --> cont["continue<br/>true | false<br/>是否继续生成"]
+        root --> stop["stopReason<br/>停止原因"]
+        root --> hook_specific["hookSpecificOutput<br/>事件特定输出"]
+        hook_specific --> event_name["hookEventName<br/>目标事件名"]
+        hook_specific --> event_fields["事件特定字段..."]
+    end
+
+    subgraph 双通道["双通道输出"]
+        stdout["stdout<br/>非 JSON 部分 → 展示给用户<br/>（退出码非 0 时）"]
+        stderr["stderr<br/>展示给模型（退出码 2 时）<br/>或用户（其他非 0 退出码时）"]
+    end
+
+    classDef main fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+    classDef field fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#424242
+    classDef channel fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+
+    class root,decision,reason,context,cont,stop,hook_specific main
+    class event_name,event_fields field
+    class stdout,stderr channel
 ```
 
 ### 顶层决策字段
@@ -548,6 +614,31 @@ PreCompact 钩子的处理流程包括：构建钩子输入、执行钩子、提
 ### 退出码与 JSON 响应的协作关系
 
 钩子的行为由两个维度共同控制：**退出码**（进程级别）和 **JSON 响应**（内容级别）。理解两者的协作关系是设计正确钩子的关键：
+
+```mermaid
+flowchart TD
+    hook["钩子执行完成"] --> exit{"退出码是多少？"}
+    exit -->|"0"| e0{"JSON decision?"}
+    e0 -->|"approve 或无"| pass["正常通过"]
+    e0 -->|"block"| json_block["阻止（JSON 优先）"]
+
+    exit -->|"2"| e2["阻止<br/>stderr 展示给模型"]
+    e2 --> json_any["无论 JSON decision 如何"]
+
+    exit -->|"其他非 0"| e3{"JSON decision?"}
+    e3 -->|"approve"| warn["警告但继续"]
+    e3 -->|"block"| other_block["阻止"]
+
+    classDef decision fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+    classDef pass_node fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    classDef block_node fill:#ffcdd2,stroke:#d32f2f,stroke-width:2px,color:#b71c1c
+    classDef warn_node fill:#fff9c4,stroke:#f9a825,stroke-width:2px,color:#f57f17
+
+    class exit,e0,e3 decision
+    class pass pass_node
+    class json_block,e2,json_any,other_block block_node
+    class warn warn_node
+```
 
 | 退出码 | JSON decision | 最终效果 |
 |--------|--------------|---------|
@@ -635,12 +726,27 @@ PreCompact 钩子的处理流程包括：构建钩子输入、执行钩子、提
 
 完整的优先级顺序为：
 
-1. **userSettings**（用户全局设置，`~/.claude/settings.json`）-- 最高优先级
-2. **projectSettings**（项目设置，`.claude/settings.json`）
-3. **localSettings**（本地设置，`.claude/settings.local.json`）
-4. **pluginHook**（插件钩子）-- 优先级较低（代码中赋值 999）
-5. **builtinHook**（内置钩子）-- 同样为低优先级
-6. **sessionHook**（会话钩子）-- 运行时临时钩子
+```mermaid
+graph TD
+    subgraph 钩子优先级["钩子优先级（从高到低）"]
+        p1["1. userSettings<br/>用户全局设置 ~/.claude/settings.json"]
+        p2["2. projectSettings<br/>项目设置 .claude/settings.json"]
+        p3["3. localSettings<br/>本地设置 .claude/settings.local.json"]
+        p4["4. pluginHook<br/>插件钩子（优先级 = 999）"]
+        p5["5. builtinHook<br/>内置钩子"]
+        p6["6. sessionHook<br/>会话临时钩子"]
+    end
+
+    p1 --> p2 --> p3 --> p4 --> p5 --> p6
+
+    classDef high fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    classDef mid fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+    classDef low fill:#f5f5f5,stroke:#9e9e9e,stroke-width:1px,color:#757575
+
+    class p1 high
+    class p2,p3 mid
+    class p4,p5,p6 low
+```
 
 Plugin 钩子和内置钩子在排序中被赋予最低的优先级数值，确保它们不会覆盖用户配置的钩子。
 
@@ -698,29 +804,25 @@ localSettings:   [钩子 C: 本地调试]
 
 Claude Code 提供了多层安全开关来应对钩子相关风险。这体现了"纵深防御（Defense in Depth）"的安全设计理念——不依赖单一的安全措施，而是在多个层面设置屏障。
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                    钩子安全模型三层门禁                                │
-├──────────────────────────────────────────────────────────────────────┤
-│                                                                      │
-│  ┌─ 第一层：全局禁用开关 ──────────────────────────────────────────┐  │
-│  │  disableAllHooks: true  →  所有钩子全部禁用                      │  │
-│  │  适用场景：紧急安全事件、系统故障排查                              │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                              ↓ 未禁用                                │
-│  ┌─ 第二层：托管模式检查 ──────────────────────────────────────────┐  │
-│  │  allowManagedHooksOnly: true  →  只允许企业策略配置的钩子        │  │
-│  │  适用场景：企业合规环境、受控部署                                  │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                              ↓ 通过                                  │
-│  ┌─ 第三层：工作区信任检查 ────────────────────────────────────────┐  │
-│  │  工作区未被信任  →  拒绝执行用户/项目配置中的钩子                │  │
-│  │  适用场景：克隆的第三方仓库、不受信任的代码源                    │  │
-│  └────────────────────────────────────────────────────────────────┘  │
-│                              ↓ 全部通过                              │
-│                         正常执行钩子                                 │
-│                                                                      │
-└──────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TD
+    start["钩子触发"] --> layer1{"第一层：全局禁用开关<br/>disableAllHooks: true?"}
+    layer1 -->|"是"| disabled["所有钩子全部禁用<br/>（紧急安全事件 / 故障排查）"]
+    layer1 -->|"否"| layer2{"第二层：托管模式检查<br/>allowManagedHooksOnly: true?"}
+    layer2 -->|"是"| managed["只允许企业策略配置的钩子<br/>（企业合规环境）"]
+    layer2 -->|"否"| layer3{"第三层：工作区信任检查<br/>工作区是否已被信任？"}
+    layer3 -->|"否"| untrusted["拒绝执行用户/项目配置中的钩子<br/>（克隆的第三方仓库）"]
+    layer3 -->|"是"| execute["正常执行钩子"]
+
+    classDef gate fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+    classDef blocked fill:#ffcdd2,stroke:#d32f2f,stroke-width:2px,color:#b71c1c
+    classDef allowed fill:#c8e6c9,stroke:#388e3c,stroke-width:2px,color:#1b5e20
+    classDef managed_node fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+
+    class layer1,layer2,layer3 gate
+    class disabled,untrusted blocked
+    class execute allowed
+    class managed managed_node
 ```
 
 **全局禁用**：当 `policySettings`（企业策略配置）中设置 `disableAllHooks: true` 时，所有钩子（包括托管钩子）都被禁用。这是终极紧急开关。
