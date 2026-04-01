@@ -1,8 +1,4 @@
-<h1 align="center">解码 Agent Harness</h1>
-
-<p align="center">
-  <strong>Claude Code 架构深度剖析</strong>
-</p>
+<h1 align="center">解码 Agent Harness——Claude Code 架构深度剖析</h1>
 
 <p align="center">
   <a href="https://github.com/lintsinghua/claude-code-book/stargazers">
